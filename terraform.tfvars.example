@@ -1,0 +1,25 @@
+# Copy this file to terraform.tfvars and fill in your values.
+
+aws_region      = "us-east-1"
+hub_aws_profile = "msp-hub"
+hub_account_id  = "111111111111"
+
+spoke_accounts = {
+  "client-alpha"   = "222222222222"
+  "client-bravo"   = "333333333333"
+  "client-charlie" = "444444444444"
+}
+
+# Generate a Grafana API key from the workspace UI after the first apply,
+# then set this value for the second apply to provision data sources.
+grafana_api_key = ""
+
+# AWS IAM Identity Center group IDs for Grafana access control
+sso_admin_group_ids  = []
+sso_editor_group_ids = []
+
+tags = {
+  Project     = "observability-hub-spoke"
+  ManagedBy   = "terraform"
+  Environment = "production"
+}
