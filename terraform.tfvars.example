@@ -1,8 +1,7 @@
 # Copy this file to terraform.tfvars and fill in your values.
 
-aws_region      = "us-east-1"
-hub_aws_profile = "msp-hub"
-hub_account_id  = "111111111111"
+aws_region  = "us-east-1"
+aws_profile = "org-management"
 
 spoke_accounts = {
   "client-alpha"   = "222222222222"
@@ -10,13 +9,19 @@ spoke_accounts = {
   "client-charlie" = "444444444444"
 }
 
-# Generate a Grafana API key from the workspace UI after the first apply,
-# then set this value for the second apply to provision data sources.
-grafana_api_key = ""
+# ---------- Grafana Cloud ----------
+# Your Grafana Cloud stack URL — find at grafana.com/orgs/<org>/stacks
+grafana_cloud_stack_url = "https://mycompany.grafana.net"
 
-# AWS IAM Identity Center group IDs for Grafana access control
-sso_admin_group_ids  = []
-sso_editor_group_ids = []
+# Generate a service account token with Admin role at:
+#   <stack>/org/serviceaccounts
+# Keep this secret — store in a secrets manager or environment variable:
+#   export TF_VAR_grafana_cloud_stack_sa_token="glsa_xxxxxxxxxxxx"
+grafana_cloud_stack_sa_token = ""
+
+# Optional: supply your own External ID (otherwise a UUID is generated).
+# The same value must be used in spoke trust policies AND the data source.
+# external_id = "3f8b9d0e-1a2b-4c5d-9e6f-7a8b9c0d1e2f"
 
 tags = {
   Project     = "observability-hub-spoke"

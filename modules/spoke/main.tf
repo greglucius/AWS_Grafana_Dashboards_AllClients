@@ -1,29 +1,33 @@
 # -----------------------------------------------------------------------------
 # Spoke Module — Deployed in each client AWS account
 #
-# Creates an IAM Role that the hub Grafana workspace can assume to read
-# CloudWatch metrics, logs, and alarms.
+# Creates an IAM Role that Grafana Cloud (running in Grafana Labs' AWS account)
+# can assume to read CloudWatch metrics, logs, and alarms.
+#
+# Security model: Grafana Cloud performs a "grafana-assume-role" chain where
+# Grafana Labs' production AWS account assumes this role, gated by an external
+# ID unique to the Grafana Cloud stack (confused-deputy protection).
+#
+# Reference: https://grafana.com/docs/grafana/latest/datasources/aws-cloudwatch/aws-authentication/
 # -----------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "trust" {
   statement {
-    sid     = "AllowHubGrafanaAssumeRole"
+    sid     = "AllowGrafanaCloudAssumeRole"
     effect  = "Allow"
     actions = ["sts:AssumeRole"]
 
     principals {
       type        = "AWS"
-      identifiers = [var.hub_grafana_role_arn]
+      identifiers = ["arn:aws:iam::${var.grafana_cloud_aws_account_id}:root"]
     }
 
-    # Optional external ID for defence-in-depth
-    dynamic "condition" {
-      for_each = var.external_id != "" ? [var.external_id] : []
-      content {
-        test     = "StringEquals"
-        variable = "sts:ExternalId"
-        values   = [condition.value]
-      }
+    # External ID is REQUIRED for Grafana Cloud — this is how Grafana Labs
+    # prevents confused-deputy attacks against customer accounts.
+    condition {
+      test     = "StringEquals"
+      variable = "sts:ExternalId"
+      values   = [var.external_id]
     }
   }
 }

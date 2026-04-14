@@ -10,18 +10,25 @@ terraform {
       source  = "grafana/grafana"
       version = "~> 3.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 }
 
-# Hub account provider — used for Grafana workspace and hub IAM
+# AWS provider — used for spoke IAM roles. Assumes the caller has credentials
+# that can create IAM in each spoke account (e.g. via OrganizationAccountAccessRole
+# or per-account profile aliases — see README for multi-account strategies).
 provider "aws" {
-  alias   = "hub"
   region  = var.aws_region
-  profile = var.hub_aws_profile
+  profile = var.aws_profile
 }
 
-# Grafana provider — configured after workspace is created
+# Grafana provider — points at an existing Grafana Cloud stack.
+# Generate a service-account token from your stack (Administration →
+# Service accounts) and pass it in via the grafana_cloud_stack_sa_token variable.
 provider "grafana" {
-  url  = "https://${module.hub.grafana_workspace_endpoint}"
-  auth = var.grafana_api_key
+  url  = var.grafana_cloud_stack_url
+  auth = var.grafana_cloud_stack_sa_token
 }

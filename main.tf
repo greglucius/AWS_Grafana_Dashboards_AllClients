@@ -1,48 +1,54 @@
 # -----------------------------------------------------------------------------
-# Hub Module — Central MSP Account (Grafana Workspace + IAM)
+# Hub-and-Spoke Observability with Grafana Cloud
+#
+#  • Spoke IAM roles (one per client account) trust Grafana Labs' production
+#    AWS account, gated by an External ID for confused-deputy protection.
+#  • Grafana Cloud CloudWatch data sources (one per spoke) configured with
+#    authType = grafana_assume_role, the spoke role ARN, and timeInterval 600s.
 # -----------------------------------------------------------------------------
-module "hub" {
-  source = "./modules/hub"
 
-  providers = {
-    aws = aws.hub
-  }
+# Generate a stable external ID if the caller didn't provide one.
+resource "random_uuid" "external_id" {
+  count = var.external_id == "" ? 1 : 0
+}
 
-  spoke_account_ids   = values(var.spoke_accounts)
-  sso_admin_group_ids = var.sso_admin_group_ids
-  tags                = var.tags
+locals {
+  external_id = var.external_id != "" ? var.external_id : random_uuid.external_id[0].result
 }
 
 # -----------------------------------------------------------------------------
-# Spoke Modules — One per client account
-# Each spoke creates an IAM role that the hub Grafana role can assume.
-# Deploy these with per-account AWS provider aliases (see README).
+# Spoke Modules — One IAM role per client account.
+# Each spoke module needs AWS creds for its target account. See README for the
+# two supported deployment patterns (provider aliases vs. separate workspaces).
 # -----------------------------------------------------------------------------
 module "spoke" {
   source   = "./modules/spoke"
   for_each = var.spoke_accounts
 
-  hub_grafana_role_arn = module.hub.grafana_role_arn
-  tags                 = var.tags
+  grafana_cloud_aws_account_id = var.grafana_cloud_aws_account_id
+  external_id                  = local.external_id
+  tags                         = var.tags
 }
 
 # -----------------------------------------------------------------------------
-# Grafana CloudWatch Data Sources — one per spoke
-# Only created when a grafana_api_key is supplied (second apply).
+# Grafana Cloud CloudWatch Data Sources — one per spoke.
 # -----------------------------------------------------------------------------
 resource "grafana_data_source" "cloudwatch" {
-  for_each = var.grafana_api_key != "" ? var.spoke_accounts : {}
+  for_each = var.spoke_accounts
 
   type = "cloudwatch"
   name = "CloudWatch-${each.key}"
 
   json_data_encoded = jsonencode({
     defaultRegion = var.aws_region
-    authType      = "assumeRole"
-    assumeRoleArn = module.spoke[each.key].spoke_role_arn
+    # "grafana_assume_role" tells Grafana Cloud to chain-assume through
+    # Grafana Labs' AWS account into the customer role.
+    authType                = "grafana_assume_role"
+    assumeRoleArn           = module.spoke[each.key].spoke_role_arn
+    externalId              = local.external_id
     customMetricsNamespaces = ""
-    # CRITICAL: 600 s minimum polling interval to prevent aggressive
-    # GetMetricData calls that spike client AWS bills.
+    # CRITICAL: 600 s minimum polling interval prevents aggressive
+    # GetMetricData calls that would spike client AWS bills.
     timeInterval = "600s"
   })
 }

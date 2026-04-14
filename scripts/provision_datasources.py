@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-Provision CloudWatch Data Sources in Amazon Managed Grafana.
+Provision CloudWatch data sources in a Grafana Cloud stack.
 
-This script dynamically adds a CloudWatch data source for each spoke account,
-configured with assume-role ARNs and a 600s minimum scrape interval to prevent
-aggressive GetMetricData API calls from inflating client AWS bills.
+Grafana Cloud authenticates to customer AWS accounts by chain-assuming a role
+through Grafana Labs' production AWS account. The data source configuration
+uses authType="grafana_assume_role" plus an External ID that must match the
+spoke IAM trust policy.
 
 Usage:
     python provision_datasources.py \
-        --grafana-url https://<workspace>.grafana-workspace.<region>.amazonaws.com \
-        --api-key <grafana-api-key> \
+        --stack-url https://mycompany.grafana.net \
+        --sa-token glsa_xxxxxxxxxxxx \
         --region us-east-1 \
+        --external-id 3f8b9d0e-1a2b-4c5d-9e6f-7a8b9c0d1e2f \
         --spoke-accounts '{"client-alpha":"222222222222","client-bravo":"333333333333"}'
 
 Environment variables (alternative to CLI flags):
-    GRAFANA_URL        — Grafana workspace endpoint
-    GRAFANA_API_KEY    — Service account token or API key
-    AWS_REGION         — Default CloudWatch region
-    SPOKE_ACCOUNTS     — JSON object mapping name → account ID
+    GRAFANA_CLOUD_STACK_URL   — stack URL (e.g. https://mycompany.grafana.net)
+    GRAFANA_CLOUD_SA_TOKEN    — stack service account token (Admin role)
+    AWS_REGION                — default CloudWatch region
+    GRAFANA_EXTERNAL_ID       — External ID matching the spoke trust policies
+    SPOKE_ACCOUNTS            — JSON: {"friendly-name": "account-id", ...}
 """
 
 import argparse
@@ -35,13 +38,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # CRITICAL: Minimum polling interval to protect client accounts from
-# excessive GetMetricData charges.  600 s = 10 minutes.
+# excessive GetMetricData charges. 600 s = 10 minutes.
 MIN_INTERVAL_SECONDS = 600
 
 SPOKE_ROLE_NAME = "GrafanaCloudWatchAccessRole"
 
 
-def grafana_request(base_url: str, api_key: str, method: str, path: str, body: dict | None = None) -> dict:
+def grafana_request(
+    base_url: str, api_key: str, method: str, path: str, body: dict | None = None
+) -> dict:
     """Send an authenticated request to the Grafana HTTP API."""
     url = f"{base_url.rstrip('/')}{path}"
     headers = {
@@ -73,9 +78,10 @@ def upsert_cloudwatch_datasource(
     name: str,
     account_id: str,
     region: str,
+    external_id: str,
     existing: dict[str, int],
 ) -> None:
-    """Create or update a CloudWatch data source for one spoke account."""
+    """Create or update a Grafana Cloud CloudWatch data source for one spoke."""
     assume_role_arn = f"arn:aws:iam::{account_id}:role/{SPOKE_ROLE_NAME}"
 
     payload = {
@@ -85,8 +91,10 @@ def upsert_cloudwatch_datasource(
         "isDefault": False,
         "jsonData": {
             "defaultRegion": region,
-            "authType": "assumeRole",
+            # Grafana Cloud-specific auth: chain-assume through Grafana Labs' AWS account.
+            "authType": "grafana_assume_role",
             "assumeRoleArn": assume_role_arn,
+            "externalId": external_id,
             "customMetricsNamespaces": "",
             # CRITICAL: 600 s minimum scrape interval.
             "timeInterval": f"{MIN_INTERVAL_SECONDS}s",
@@ -97,30 +105,45 @@ def upsert_cloudwatch_datasource(
         ds_id = existing[name]
         payload["id"] = ds_id
         grafana_request(base_url, api_key, "PUT", f"/api/datasources/{ds_id}", payload)
-        logger.info("Updated data source '%s' (id=%d, assume_role=%s)", name, ds_id, assume_role_arn)
+        logger.info(
+            "Updated data source '%s' (id=%d, assume_role=%s)",
+            name,
+            ds_id,
+            assume_role_arn,
+        )
     else:
         result = grafana_request(base_url, api_key, "POST", "/api/datasources", payload)
-        logger.info("Created data source '%s' (id=%s, assume_role=%s)", name, result.get("id"), assume_role_arn)
+        logger.info(
+            "Created data source '%s' (id=%s, assume_role=%s)",
+            name,
+            result.get("id"),
+            assume_role_arn,
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Provision CloudWatch data sources in Amazon Managed Grafana"
+        description="Provision CloudWatch data sources in a Grafana Cloud stack"
     )
     parser.add_argument(
-        "--grafana-url",
-        default=os.environ.get("GRAFANA_URL", ""),
-        help="Grafana workspace URL (or set GRAFANA_URL env var)",
+        "--stack-url",
+        default=os.environ.get("GRAFANA_CLOUD_STACK_URL", ""),
+        help="Grafana Cloud stack URL (or set GRAFANA_CLOUD_STACK_URL)",
     )
     parser.add_argument(
-        "--api-key",
-        default=os.environ.get("GRAFANA_API_KEY", ""),
-        help="Grafana API key (or set GRAFANA_API_KEY env var)",
+        "--sa-token",
+        default=os.environ.get("GRAFANA_CLOUD_SA_TOKEN", ""),
+        help="Grafana Cloud service account token (or set GRAFANA_CLOUD_SA_TOKEN)",
     )
     parser.add_argument(
         "--region",
         default=os.environ.get("AWS_REGION", "us-east-1"),
         help="Default AWS region for CloudWatch queries",
+    )
+    parser.add_argument(
+        "--external-id",
+        default=os.environ.get("GRAFANA_EXTERNAL_ID", ""),
+        help="External ID matching spoke IAM trust policies (or set GRAFANA_EXTERNAL_ID)",
     )
     parser.add_argument(
         "--spoke-accounts",
@@ -130,11 +153,15 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if not args.grafana_url:
-        logger.error("--grafana-url or GRAFANA_URL is required")
-        sys.exit(1)
-    if not args.api_key:
-        logger.error("--api-key or GRAFANA_API_KEY is required")
+    missing = []
+    if not args.stack_url:
+        missing.append("--stack-url / GRAFANA_CLOUD_STACK_URL")
+    if not args.sa_token:
+        missing.append("--sa-token / GRAFANA_CLOUD_SA_TOKEN")
+    if not args.external_id:
+        missing.append("--external-id / GRAFANA_EXTERNAL_ID")
+    if missing:
+        logger.error("Missing required argument(s): %s", ", ".join(missing))
         sys.exit(1)
 
     try:
@@ -150,20 +177,21 @@ def main() -> None:
     logger.info(
         "Provisioning %d CloudWatch data source(s) in %s",
         len(spoke_accounts),
-        args.grafana_url,
+        args.stack_url,
     )
     logger.info("Minimum scrape interval: %ds (protects client billing)", MIN_INTERVAL_SECONDS)
 
-    existing = get_existing_datasources(args.grafana_url, args.api_key)
+    existing = get_existing_datasources(args.stack_url, args.sa_token)
 
     for friendly_name, account_id in spoke_accounts.items():
         ds_name = f"CloudWatch-{friendly_name}"
         upsert_cloudwatch_datasource(
-            base_url=args.grafana_url,
-            api_key=args.api_key,
+            base_url=args.stack_url,
+            api_key=args.sa_token,
             name=ds_name,
             account_id=account_id,
             region=args.region,
+            external_id=args.external_id,
             existing=existing,
         )
 
